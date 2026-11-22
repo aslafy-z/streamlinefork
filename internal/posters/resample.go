@@ -132,3 +132,43 @@ func clampByte(v float32) uint8 {
 	}
 	return uint8(v + 0.5)
 }
+
+// orient turns m upright for an EXIF orientation: 2 to 4 mirror or flip it,
+// 5 to 8 also swap its axes. Any other value returns m as it is.
+func orient(m *image.RGBA, o int) *image.RGBA {
+	if o < 2 || o > 8 {
+		return m
+	}
+	sw, sh := m.Bounds().Dx(), m.Bounds().Dy()
+	w, h := sw, sh
+	if o >= 5 {
+		w, h = sh, sw
+	}
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			var sx, sy int
+			switch o {
+			case 2:
+				sx, sy = sw-1-x, y
+			case 3:
+				sx, sy = sw-1-x, sh-1-y
+			case 4:
+				sx, sy = x, sh-1-y
+			case 5:
+				sx, sy = y, x
+			case 6:
+				sx, sy = y, sh-1-x
+			case 7:
+				sx, sy = sw-1-y, sh-1-x
+			case 8:
+				sx, sy = sw-1-y, x
+			}
+			copy(
+				out.Pix[y*out.Stride+x*4:y*out.Stride+x*4+4],
+				m.Pix[sy*m.Stride+sx*4:],
+			)
+		}
+	}
+	return out
+}

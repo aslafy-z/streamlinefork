@@ -2,7 +2,9 @@ package posters
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
+	"io"
 )
 
 // jpegMeta walks the segments ahead of a JPEG's image data and returns its
@@ -77,4 +79,78 @@ func exifOrientation(t []byte) int {
 		}
 	}
 	return 0
+}
+
+// maxICCBytes bounds the profile read out of a PNG's iCCP chunk; real
+// profiles are a few kilobytes, rarely more than a few hundred.
+const maxICCBytes = 1 << 20
+
+// iccSegmentData is how much of a profile one APP2 segment carries: a
+// segment's 65535 bytes less its length, the "ICC_PROFILE\0" tag and the
+// sequence bytes.
+const iccSegmentData = 65535 - 2 - 12 - 2
+
+// pngICC reads a PNG's iCCP chunk and returns its profile as the APP2
+// segments a JPEG carries it in, or nil when there is none or it cannot be
+// read. The chunk must come before the image data, which is all head holds.
+func pngICC(head []byte) [][]byte {
+	const sig = "\x89PNG\r\n\x1a\n"
+	if !bytes.HasPrefix(head, []byte(sig)) {
+		return nil
+	}
+	for i := len(sig); i+8 <= len(head); {
+		n := int(binary.BigEndian.Uint32(head[i:]))
+		typ := string(head[i+4 : i+8])
+		if n < 0 || i+12+n > len(head) || typ == "IDAT" {
+			return nil
+		}
+		if typ == "iCCP" {
+			return iccSegments(inflateICC(head[i+8 : i+8+n]))
+		}
+		i += 12 + n
+	}
+	return nil
+}
+
+// inflateICC decompresses an iCCP chunk's body: a name, a NUL, a compression
+// method (0, zlib) and the compressed profile.
+func inflateICC(chunk []byte) []byte {
+	nul := bytes.IndexByte(chunk, 0)
+	if nul < 0 || nul+2 > len(chunk) || chunk[nul+1] != 0 {
+		return nil
+	}
+	r, err := zlib.NewReader(bytes.NewReader(chunk[nul+2:]))
+	if err != nil {
+		return nil
+	}
+	defer r.Close()
+	profile, err := io.ReadAll(io.LimitReader(r, maxICCBytes+1))
+	if err != nil || len(profile) > maxICCBytes {
+		return nil
+	}
+	return profile
+}
+
+// iccSegments splits a profile into numbered APP2 segments.
+func iccSegments(profile []byte) [][]byte {
+	if len(profile) == 0 {
+		return nil
+	}
+	count := (len(profile) + iccSegmentData - 1) / iccSegmentData
+	if count > 255 {
+		return nil
+	}
+	segs := make([][]byte, 0, count)
+	for k := range count {
+		part := profile[k*iccSegmentData : min(len(profile), (k+1)*iccSegmentData)]
+		seg := make([]byte, 0, 4+12+2+len(part))
+		seg = append(seg, 0xFF, 0xE2)
+		//nolint:gosec // at most 65535, by iccSegmentData
+		n := uint16(2 + 12 + 2 + len(part))
+		seg = binary.BigEndian.AppendUint16(seg, n)
+		seg = append(seg, "ICC_PROFILE\x00"...)
+		seg = append(seg, byte(k+1), byte(count))
+		segs = append(segs, append(seg, part...))
+	}
+	return segs
 }

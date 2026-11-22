@@ -250,7 +250,7 @@
 	>
 		{#snippet art()}
 			<div class="shadow-[0_24px_48px_rgb(0_0_0_/0.5)]">
-				<BookCover src={bookPosterUrl(book.id)} alt={i18n.common_poster_alt({ title: book.title })} />
+				<BookCover src={bookPosterUrl(book.id)} alt={i18n.common_poster_alt({ title: book.title })} loading="eager" />
 			</div>
 			{#if book.status !== "available"}
 				<span class="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2">

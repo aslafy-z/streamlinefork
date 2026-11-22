@@ -105,10 +105,11 @@ func removeVariants(orig string) {
 
 // variant returns the path of orig scaled down to w pixels wide, creating it
 // on first use, or "" when the original is to be served as it is: it is
-// already that narrow, it is not a JPEG or PNG (a GIF keeps its animation), it
-// is larger than maxVariantSourcePixels, it carries an EXIF orientation the
-// copy would lose, or it has transparency a JPEG would lose. A variant carries
-// its original's modification time, and one that does not is rebuilt.
+// already that narrow as shown, it is not a JPEG or PNG (a GIF keeps its
+// animation), it is larger than maxVariantSourcePixels, or it has transparency
+// a JPEG would lose. A JPEG's EXIF orientation is applied to the copy, which
+// carries none. A variant carries its original's modification time, and one
+// that does not is rebuilt.
 func variant(ctx context.Context, orig string, w int) (string, error) {
 	st, err := os.Stat(orig)
 	if err != nil {
@@ -132,8 +133,9 @@ func variant(ctx context.Context, orig string, w int) (string, error) {
 		}
 		return "", err
 	}
-	if hdr.cfg.Width <= w || hdr.cfg.Width*hdr.cfg.Height > maxVariantSourcePixels ||
-		hdr.orientation > 1 {
+	shownW, _ := hdr.shown()
+	if shownW <= w || hdr.cfg.Width*hdr.cfg.Height > maxVariantSourcePixels ||
+		hdr.orientation > 8 {
 		return "", nil
 	}
 
@@ -191,11 +193,18 @@ func build(
 		return "", nil
 	}
 
-	h := max(1, (hdr.cfg.Height*w+hdr.cfg.Width/2)/hdr.cfg.Width)
+	shownW, shownH := hdr.shown()
+	h := max(1, (shownH*w+shownW/2)/shownW)
+	// Scaled as stored, then turned upright: the copy carries no EXIF, and
+	// turning the small image costs nothing.
+	sw, sh := w, h
+	if hdr.orientation >= 5 {
+		sw, sh = h, w
+	}
 	var enc bytes.Buffer
 	if err := jpeg.Encode(
 		&enc,
-		resample(src, w, h),
+		orient(resample(src, sw, sh), hdr.orientation),
 		&jpeg.Options{Quality: variantJPEGQuality},
 	); err != nil {
 		return "", otelx.RecordSpanError(
@@ -204,6 +213,13 @@ func build(
 		)
 	}
 	if err := writeVariant(dst, enc.Bytes(), hdr.icc, st.ModTime()); err != nil {
+		return "", otelx.RecordSpanError(span, err)
+	}
+	// A Remove that ran during the build could not take the directory, which
+	// held the copy being written; the copy and the directory go now.
+	if _, err := os.Stat(orig); errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(dst)
+		_ = os.Remove(filepath.Dir(dst))
 		return "", otelx.RecordSpanError(span, err)
 	}
 	span.SetAttributes(attribute.String("outcome", "scaled"))
@@ -259,8 +275,17 @@ type header struct {
 	cfg image.Config
 	// orientation is the JPEG's EXIF orientation, 0 without one.
 	orientation int
-	// icc holds the JPEG's ICC profile segments, each whole, marker included.
+	// icc holds the ICC profile as JPEG APP2 segments, each whole, marker
+	// included: a JPEG's own, or a PNG's iCCP chunk split into them.
 	icc [][]byte
+}
+
+// shown is the poster's size as a browser draws it, after its orientation.
+func (h header) shown() (int, int) {
+	if h.orientation >= 5 && h.orientation <= 8 {
+		return h.cfg.Height, h.cfg.Width
+	}
+	return h.cfg.Width, h.cfg.Height
 }
 
 func readHeader(orig string) (header, error) {
@@ -282,6 +307,7 @@ func readHeader(orig string) (header, error) {
 	case "jpeg":
 		hdr.orientation, hdr.icc = jpegMeta(head)
 	case "png":
+		hdr.icc = pngICC(head)
 	default:
 		return header{}, fmt.Errorf("%w: %s", errNotScalable, format)
 	}

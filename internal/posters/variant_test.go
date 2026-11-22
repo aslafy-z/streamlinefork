@@ -2,8 +2,10 @@ package posters
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/draw"
@@ -235,14 +237,59 @@ var _ = Describe("poster variants", Label("unit", "posters"), func() {
 		}
 	})
 
-	It("serves the poster itself when its EXIF turns it", func() {
-		body := withSegment(jpegOf(780, 1170), exifSegment(binary.BigEndian, 6))
-		Expect(
-			svc.Put(context.Background(), "artists", 9, bytes.NewReader(body)),
-		).To(Succeed())
+	DescribeTable("turns an EXIF-oriented poster upright in its variant",
+		func(orientation uint16, tl, tr, bl, br color.RGBA) {
+			// Stored as four coloured quadrants, sized so it shows 780x1170.
+			w, h := 780, 1170
+			if orientation >= 5 {
+				w, h = h, w
+			}
+			img := image.NewRGBA(image.Rect(0, 0, w, h))
+			for y := range h {
+				for x := range w {
+					c := map[[2]bool]color.RGBA{
+						{false, false}: red, {true, false}: green,
+						{false, true}: blue, {true, true}: white,
+					}[[2]bool{x >= w/2, y >= h/2}]
+					img.SetRGBA(x, y, c)
+				}
+			}
+			var buf bytes.Buffer
+			Expect(jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95})).To(Succeed())
+			body := withSegment(
+				buf.Bytes(),
+				exifSegment(binary.BigEndian, orientation),
+			)
+			Expect(
+				svc.Put(context.Background(), "artists", 9, bytes.NewReader(body)),
+			).To(Succeed())
 
-		Expect(serve("artists", 9, "?w=320").Body.Bytes()).To(Equal(body))
-	})
+			out, err := jpeg.Decode(serve("artists", 9, "?w=320").Body)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out.Bounds().Size()).To(Equal(image.Pt(320, 480)))
+			for _, c := range []struct {
+				x, y int
+				want color.RGBA
+			}{{20, 20, tl}, {300, 20, tr}, {20, 460, bl}, {300, 460, br}} {
+				r, g, b, _ := out.At(c.x, c.y).RGBA()
+				got := color.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), 255}
+				for i, v := range []uint8{got.R, got.G, got.B} {
+					want := []uint8{c.want.R, c.want.G, c.want.B}[i]
+					Expect(
+						int(v),
+					).To(BeNumerically("~", int(want), 24), "%d,%d", c.x, c.y)
+				}
+			}
+		},
+		Entry("2, mirrored", uint16(2), green, red, white, blue),
+		Entry("3, upside down", uint16(3), white, blue, green, red),
+		Entry("4, flipped", uint16(4), blue, white, red, green),
+		Entry("5, transposed", uint16(5), red, blue, green, white),
+		Entry("6, turned clockwise", uint16(6), blue, red, white, green),
+		Entry("7, transversed", uint16(7), white, green, blue, red),
+		Entry("8, turned counter-clockwise", uint16(8), green, white, red, blue),
+	)
 
 	It("scales a poster whose EXIF orientation is upright", func() {
 		body := withSegment(jpegOf(780, 1170), exifSegment(binary.LittleEndian, 1))
@@ -275,6 +322,53 @@ var _ = Describe("poster variants", Label("unit", "posters"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.Width).To(Equal(320))
 	})
+
+	It(
+		"carries a PNG's ICC profile into its variant, split across segments",
+		func() {
+			profile := make([]byte, 70_000)
+			for i := range profile {
+				profile[i] = byte(i * 31)
+			}
+			img := image.NewRGBA(image.Rect(0, 0, 780, 1170))
+			for i := range img.Pix {
+				img.Pix[i] = 200
+				if i%4 == 3 {
+					img.Pix[i] = 255
+				}
+			}
+			var buf bytes.Buffer
+			Expect(png.Encode(&buf, img)).To(Succeed())
+			var z bytes.Buffer
+			zw := zlib.NewWriter(&z)
+			_, err := zw.Write(profile)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(zw.Close()).To(Succeed())
+			// iCCP goes right after IHDR: the signature, then IHDR's 25 bytes.
+			body := append([]byte{}, buf.Bytes()[:33]...)
+			body = append(
+				body,
+				pngChunk("iCCP", append([]byte("test\x00\x00"), z.Bytes()...))...)
+			body = append(body, buf.Bytes()[33:]...)
+			Expect(
+				svc.Put(context.Background(), "albums", 15, bytes.NewReader(body)),
+			).To(Succeed())
+
+			out := serve("albums", 15, "?w=320").Body.Bytes()
+
+			_, segs := jpegMeta(out)
+			Expect(segs).To(HaveLen(2))
+			var got []byte
+			for k, seg := range segs {
+				Expect(seg[16:18]).To(Equal([]byte{byte(k + 1), 2}))
+				got = append(got, seg[18:]...)
+			}
+			Expect(got).To(Equal(profile))
+			cfg, err := jpeg.DecodeConfig(bytes.NewReader(out))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Width).To(Equal(320))
+		},
+	)
 
 	It("decodes a poster it serves as it is only once", func() {
 		img := image.NewNRGBA(image.Rect(0, 0, 400, 400))
@@ -392,4 +486,20 @@ func segment(marker byte, body []byte) []byte {
 	n := uint16(len(body) + 2)
 	out := binary.BigEndian.AppendUint16([]byte{0xFF, marker}, n)
 	return append(out, body...)
+}
+
+var (
+	red   = color.RGBA{R: 255, A: 255}
+	green = color.RGBA{G: 255, A: 255}
+	blue  = color.RGBA{B: 255, A: 255}
+	white = color.RGBA{R: 255, G: 255, B: 255, A: 255}
+)
+
+// pngChunk frames a PNG chunk around its data.
+func pngChunk(typ string, data []byte) []byte {
+	//nolint:gosec // a test chunk is far below 4 GiB
+	out := binary.BigEndian.AppendUint32(nil, uint32(len(data)))
+	out = append(out, typ...)
+	out = append(out, data...)
+	return binary.BigEndian.AppendUint32(out, crc32.ChecksumIEEE(out[4:]))
 }

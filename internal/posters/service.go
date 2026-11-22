@@ -251,6 +251,9 @@ func store(dst string, r io.Reader, replace bool) error {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("rename: %w", err)
 	}
+	// Scaled copies of the poster this one replaced go with it, whatever the
+	// filesystem's timestamp resolution says about their age.
+	removeVariants(dst)
 	return nil
 }
 
@@ -296,24 +299,33 @@ func (p *posters) Serve(
 		return
 	}
 	path := p.Path(kind, id)
+	outcome, cacheControl := "hit", "public, max-age=86400"
 	if width > 0 {
 		// A variant that cannot be made costs sharpness, never the poster.
 		switch scaled, err := variant(ctx, path, width); {
 		case err == nil && scaled != "":
-			path = scaled
-		case err != nil && !errors.Is(err, os.ErrNotExist) && ctx.Err() == nil:
-			slog.WarnContext(
-				ctx,
-				"poster variant failed",
-				"poster.kind",
-				kind,
-				"poster.id",
-				id,
-				"poster.width",
-				width,
-				"error",
-				err,
-			)
+			path, outcome = scaled, "variant"
+		case err == nil:
+			outcome = "variant_as_is"
+		case errors.Is(err, os.ErrNotExist):
+		default:
+			// The original goes out under the variant's URL: a shared cache
+			// keeps it briefly, so the next request tries the resize again.
+			outcome, cacheControl = "variant_failed", "public, max-age=300"
+			if ctx.Err() == nil {
+				slog.WarnContext(
+					ctx,
+					"poster variant failed",
+					"poster.kind",
+					kind,
+					"poster.id",
+					id,
+					"poster.width",
+					width,
+					"error",
+					err,
+				)
+			}
 		}
 	}
 	f, err := os.Open(filepath.Clean(path))
@@ -334,8 +346,8 @@ func (p *posters) Serve(
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	record("hit")
+	record(outcome)
 	w.Header().Set("Content-Type", sniffImageType(f))
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", cacheControl)
 	http.ServeContent(w, r, "poster.jpg", st.ModTime(), f)
 }

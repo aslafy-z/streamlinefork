@@ -3,6 +3,7 @@ package posters
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"image"
 	"image/color"
 	"image/draw"
@@ -11,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -232,6 +235,117 @@ var _ = Describe("poster variants", Label("unit", "posters"), func() {
 		}
 	})
 
+	It("serves the poster itself when its EXIF turns it", func() {
+		body := withSegment(jpegOf(780, 1170), exifSegment(binary.BigEndian, 6))
+		Expect(
+			svc.Put(context.Background(), "artists", 9, bytes.NewReader(body)),
+		).To(Succeed())
+
+		Expect(serve("artists", 9, "?w=320").Body.Bytes()).To(Equal(body))
+	})
+
+	It("scales a poster whose EXIF orientation is upright", func() {
+		body := withSegment(jpegOf(780, 1170), exifSegment(binary.LittleEndian, 1))
+		Expect(
+			svc.Put(context.Background(), "artists", 10, bytes.NewReader(body)),
+		).To(Succeed())
+
+		cfg, err := jpeg.DecodeConfig(serve("artists", 10, "?w=320").Body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Width).To(Equal(320))
+	})
+
+	It("keeps the poster's ICC profile in the variant", func() {
+		profile := append(
+			[]byte("ICC_PROFILE\x00\x01\x01"),
+			bytes.Repeat([]byte{7}, 300)...)
+		seg := segment(0xE2, profile)
+		Expect(
+			svc.Put(
+				context.Background(),
+				"movies",
+				11,
+				bytes.NewReader(withSegment(jpegOf(780, 1170), seg)),
+			),
+		).To(Succeed())
+
+		out := serve("movies", 11, "?w=320").Body.Bytes()
+		Expect(out[:2+len(seg)]).To(Equal(append([]byte{0xFF, 0xD8}, seg...)))
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(out))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Width).To(Equal(320))
+	})
+
+	It("decodes a poster it serves as it is only once", func() {
+		img := image.NewNRGBA(image.Rect(0, 0, 400, 400))
+		var buf bytes.Buffer
+		Expect(png.Encode(&buf, img)).To(Succeed())
+		Expect(
+			svc.Put(
+				context.Background(),
+				"artists",
+				12,
+				bytes.NewReader(buf.Bytes()),
+			),
+		).To(Succeed())
+		path := svc.Path("artists", 12)
+		st, err := os.Stat(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(servedAsIs.has(path, st)).To(BeFalse())
+
+		serve("artists", 12, "?w=200")
+
+		Expect(servedAsIs.has(path, st)).To(BeTrue())
+		Expect(serve("artists", 12, "?w=120").Body.Bytes()).To(Equal(buf.Bytes()))
+	})
+
+	It("drops a poster's variants when it is replaced", func() {
+		ctx := context.Background()
+		Expect(
+			svc.Put(ctx, "movies", 13, bytes.NewReader(jpegOf(780, 1170))),
+		).To(Succeed())
+		serve("movies", 13, "?w=200")
+		path := variantPath(svc.Path("movies", 13), 200)
+		Expect(path).To(BeAnExistingFile())
+
+		Expect(
+			svc.Put(ctx, "movies", 13, bytes.NewReader(jpegOf(600, 900))),
+		).To(Succeed())
+
+		Expect(path).NotTo(BeAnExistingFile())
+	})
+
+	It("serves the poster with a short cache life when its variant fails", func() {
+		body := jpegOf(780, 1170)
+		Expect(
+			svc.Put(context.Background(), "movies", 14, bytes.NewReader(body)),
+		).To(Succeed())
+		// A directory where the variant goes makes the rename fail.
+		Expect(
+			os.Mkdir(variantPath(svc.Path("movies", 14), 320), 0o750),
+		).To(Succeed())
+
+		rec := serve("movies", 14, "?w=320")
+
+		Expect(rec.Code).To(Equal(http.StatusOK))
+		Expect(rec.Body.Bytes()).To(Equal(body))
+		Expect(rec.Header().Get("Cache-Control")).To(Equal("public, max-age=300"))
+	})
+
+	It("lists the same widths as the SPA", func() {
+		ts, err := os.ReadFile("../../web/app/lib/posters.ts")
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`POSTER_WIDTHS = \[([^\]]*)\]`).FindSubmatch(ts)
+		Expect(m).NotTo(BeNil())
+		spa := make([]int, 0, len(variantWidths))
+		for f := range strings.SplitSeq(string(m[1]), ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(f))
+			Expect(err).NotTo(HaveOccurred())
+			spa = append(spa, n)
+		}
+		Expect(spa).To(Equal(variantWidths))
+	})
+
 	It("answers 404 for a width of a poster that is not cached", func() {
 		Expect(serve("movies", 404, "?w=320").Code).To(Equal(http.StatusNotFound))
 	})
@@ -245,3 +359,37 @@ var _ = Describe("poster variants", Label("unit", "posters"), func() {
 		Expect(serve("movies", 7, "?retry=2").Body.Bytes()).To(Equal(body))
 	})
 })
+
+// withSegment inserts a marker segment right after a JPEG's SOI.
+func withSegment(j, seg []byte) []byte {
+	out := append([]byte{}, j[:2]...)
+	out = append(out, seg...)
+	return append(out, j[2:]...)
+}
+
+// exifSegment is an APP1 segment holding one IFD with only an orientation.
+func exifSegment(bo binary.ByteOrder, orientation uint16) []byte {
+	tiff := make([]byte, 8+2+12+4)
+	if bo == binary.LittleEndian {
+		copy(tiff, "II")
+	} else {
+		copy(tiff, "MM")
+	}
+	bo.PutUint16(tiff[2:], 42)
+	bo.PutUint32(tiff[4:], 8)
+	bo.PutUint16(tiff[8:], 1)
+	bo.PutUint16(tiff[10:], 0x0112)
+	bo.PutUint16(tiff[12:], 3)
+	bo.PutUint32(tiff[14:], 1)
+	bo.PutUint16(tiff[18:], orientation)
+	body := append([]byte("Exif\x00\x00"), tiff...)
+	return segment(0xE1, body)
+}
+
+// segment frames a JPEG marker segment around its body.
+func segment(marker byte, body []byte) []byte {
+	//nolint:gosec // a test segment is far below the 64 KiB a length can say
+	n := uint16(len(body) + 2)
+	out := binary.BigEndian.AppendUint16([]byte{0xFF, marker}, n)
+	return append(out, body...)
+}

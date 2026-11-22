@@ -35,11 +35,9 @@ export function personPhotoUrl(id: number): string {
 }
 
 // The widths the poster proxy scales a library poster to (`variantWidths` in
-// internal/posters/variant.go holds the same list).
+// internal/posters/variant.go holds the same list; the proxy rounds a width it
+// does not hold up to its next rung).
 const POSTER_WIDTHS = [120, 200, 320, 480, 640];
-
-// The width the full-size poster is advertised at: past the widest rung's.
-const ORIGINAL_WIDTH = 400;
 
 // The `sizes` a lazily loaded poster gets: the browser reads the slot from
 // layout, and one that does not know `auto` assumes an ordinary card.
@@ -49,14 +47,14 @@ export const POSTER_SIZES = "auto, 180px";
 // scale. Each candidate is advertised at half its real width, so the browser
 // picks the file holding about two pixels per device pixel of the slot: Chrome
 // draws a poster reduced four or five times in one pass aliased, and one
-// served at the slot's own size soft.
+// served at the slot's own size soft. The full-size poster is not a
+// candidate: the widest rung covers a card at any density, and a browser that
+// falls back to the 180px slot on a 2x screen would otherwise pick the
+// original for every card.
 export function posterSrcset(src: string, query = ""): string | undefined {
 	if (!src.startsWith("/posters/") || src.startsWith("/posters/lookup/")) return undefined;
 	const sep = query ? "&" : "?";
-	return [
-		...POSTER_WIDTHS.map((w) => `${src}${query}${sep}w=${w} ${w / 2}w`),
-		`${src}${query} ${ORIGINAL_WIDTH}w`,
-	].join(", ");
+	return POSTER_WIDTHS.map((w) => `${src}${query}${sep}w=${w} ${w / 2}w`).join(", ");
 }
 
 // Session-scoped negative cache. Poster URLs are constructed client-side, so

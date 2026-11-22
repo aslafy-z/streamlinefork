@@ -19,39 +19,42 @@ import (
 // browser reducing a poster by four or five times in one pass draws it
 // aliased, so the SPA asks for the rung about twice the size it displays and
 // leaves the browser a reduction it filters well. The ladder is closed: an
-// open width would let a client fill the data volume one pixel at a time.
+// asked width is rounded up to a rung, so a client cannot fill the data volume
+// one pixel at a time, and a SPA holding another list still gets a poster.
 // web/app/lib/posters.ts holds the same list.
 var variantWidths = []int{120, 200, 320, 480, 640}
 
-// maxVariantSourcePixels bounds what one resize decodes into memory, at four
-// bytes a pixel.
-const maxVariantSourcePixels = 40_000_000
+// maxVariantSourcePixels bounds what one resize decodes into memory: up to
+// eight bytes a pixel for a 16-bit PNG, four for most others. A larger poster
+// is served as it is.
+const maxVariantSourcePixels = 16_000_000
 
 const variantJPEGQuality = 85
 
 // resizing bounds how many posters are decoded at once: a page of cards asks
-// for all of its variants together.
-var resizing = make(chan struct{}, max(1, runtime.GOMAXPROCS(0)/2))
+// for all of its variants together, and each decode holds its whole source.
+var resizing = make(chan struct{}, min(4, max(1, runtime.GOMAXPROCS(0)/2)))
 
-// variantWidth reads the `w` query parameter: 0 without one, and an error for
-// a width outside the ladder.
+// variantWidth reads the `w` query parameter as a rung of variantWidths: the
+// smallest one at least as wide as asked, 0 (the poster itself) without one or
+// past the widest, and an error for a value that is not a positive integer.
 func variantWidth(q url.Values) (int, error) {
 	raw := q.Get("w")
 	if raw == "" {
 		return 0, nil
 	}
 	asked, err := strconv.Atoi(raw)
-	if err != nil {
+	if err != nil || asked <= 0 {
 		return 0, fmt.Errorf("posters: unsupported width %q", raw)
 	}
 	// The rung is returned, never the parsed value: nothing a request sends
 	// reaches a file name.
 	for _, w := range variantWidths {
-		if w == asked {
+		if w >= asked {
 			return w, nil
 		}
 	}
-	return 0, fmt.Errorf("posters: unsupported width %q", raw)
+	return 0, nil
 }
 
 func variantPath(orig string, w int) string {

@@ -491,7 +491,7 @@ An extension serves its own routes beside these: `/api/v1/extensions/{name}/card
 | `POST` | `/auth/login` · `/auth/register` · `/auth/logout` | Cookie-based, `204` on success | None |
 | `GET` | `/auth/config` · `/auth/invite/{token}` | Pre-auth SPA bootstrap | None |
 | `GET` | `/auth/oidc/{name}/start` · `/callback` | The OIDC flow | None |
-| `GET` | `/posters/{kind}/{id}/poster.jpg` | Poster proxy; `kind` is `movies`, `tvshows`, `artists`, `albums`, `books` or `authors`. `?w=120\|200\|320\|480\|640` answers a copy scaled down to that width (the poster itself when it is no wider); any other width is a `400` | — |
+| `GET` | `/posters/{kind}/{id}/poster.jpg` | Poster proxy; `kind` is `movies`, `tvshows`, `artists`, `albums`, `books` or `authors`. `?w=N` answers a copy scaled down to the first of 120, 200, 320, 480 or 640 that is at least `N` (the poster itself when it is no wider, or `N` is past 640); a `w` that is not a positive integer is a `400` | — |
 | `GET` | `/posters/lookup/{kind}/{key}/poster.jpg` | Art for a title that is not in the library yet: `kind` is `artists` or `albums` (a MusicBrainz id, a release-group id for albums) or `books` (a Hardcover book id). The server fetches it from a source it remembered while serving the lookup, so a tile listed before a restart answers `404` until its search runs again | Session |
 
 ---

@@ -5,6 +5,7 @@ import (
 	"context"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"net/http"
@@ -160,7 +161,7 @@ var _ = Describe("poster variants", Label("unit", "posters"), func() {
 		Expect(rec.Body.Bytes()).To(Equal(buf.Bytes()))
 	})
 
-	It("refuses a width outside the ladder", func() {
+	It("rounds a width between rungs up to the next one", func() {
 		Expect(
 			svc.Put(
 				context.Background(),
@@ -171,7 +172,37 @@ var _ = Describe("poster variants", Label("unit", "posters"), func() {
 		).
 			To(Succeed())
 
-		for _, q := range []string{"?w=321", "?w=0", "?w=-200", "?w=abc", "?w=99999"} {
+		cfg, err := jpeg.DecodeConfig(serve("movies", 6, "?w=321").Body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Width).To(Equal(480))
+		_, err = os.Stat(variantPath(svc.Path("movies", 6), 321))
+		Expect(os.IsNotExist(err)).To(BeTrue())
+	})
+
+	It("serves the poster itself for a width past the widest rung", func() {
+		body := jpegOf(780, 1170)
+		Expect(
+			svc.Put(context.Background(), "movies", 8, bytes.NewReader(body)),
+		).To(Succeed())
+
+		rec := serve("movies", 8, "?w=99999")
+
+		Expect(rec.Code).To(Equal(http.StatusOK))
+		Expect(rec.Body.Bytes()).To(Equal(body))
+	})
+
+	It("refuses a width that is not a positive integer", func() {
+		Expect(
+			svc.Put(
+				context.Background(),
+				"movies",
+				6,
+				bytes.NewReader(jpegOf(780, 1170)),
+			),
+		).
+			To(Succeed())
+
+		for _, q := range []string{"?w=0", "?w=-200", "?w=abc", "?w=1.5"} {
 			Expect(serve("movies", 6, q).Code).To(Equal(http.StatusBadRequest), q)
 		}
 		entries, err := os.ReadDir(
@@ -179,6 +210,26 @@ var _ = Describe("poster variants", Label("unit", "posters"), func() {
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(entries).To(HaveLen(1))
+	})
+
+	It("downscales band by band exactly as from a full copy", func() {
+		src := image.NewYCbCr(
+			image.Rect(3, 5, 3+517, 5+771),
+			image.YCbCrSubsampleRatio420,
+		)
+		for i := range src.Y {
+			src.Y[i] = uint8(i * 7)
+		}
+		for i := range src.Cb {
+			src.Cb[i], src.Cr[i] = uint8(i*3), uint8(i*5)
+		}
+		full := image.NewRGBA(image.Rect(0, 0, 517, 771))
+		draw.Draw(full, full.Bounds(), src, src.Bounds().Min, draw.Src)
+
+		for _, size := range [][2]int{{200, 298}, {320, 477}, {1, 1}, {517, 771}} {
+			Expect(Downscale(src, size[0], size[1]).Pix).
+				To(Equal(Downscale(full, size[0], size[1]).Pix), "%v", size)
+		}
 	})
 
 	It("answers 404 for a width of a poster that is not cached", func() {

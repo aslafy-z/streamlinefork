@@ -1,0 +1,14 @@
+# Throwaway instance for the specials reproduction. Replace REPRO with a
+# scratch directory.
+data_dir: REPRO/data
+server: {host: 127.0.0.1, port: 18480}
+auth:
+  session_secret: repro-session-secret-0123456789abcdef
+  seed_admin: {email: verify@streamline.local, password: Verify-Passw0rd!}
+library: {download_path: REPRO/downloads, movie_path: REPRO/movies, series_path: REPRO/series, music_path: REPRO/music, ebook_path: REPRO/books, audiobook_path: REPRO/audiobooks}
+download: {space_check: false}
+schedules: {tv_missing_search: 24h}
+download_clients:
+  - {name: builtin, client_type: builtin, enabled: true, download_dir: REPRO/downloads}
+indexers:
+  - {name: faketracker, protocol: torznab, host: 127.0.0.1, port: 18490, api_key: fake-key, enabled: true}
